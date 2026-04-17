@@ -1,30 +1,193 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-export default function Board() {
+const TOP_PITS = [1, 2, 3, 4, 5];
+const BOTTOM_PITS = [7, 8, 9, 10, 11];
+const TOP_ROW_INDICES = [1, 2, 3, 4, 5];
+const BOTTOM_ROW_INDICES = [11, 10, 9, 8, 7];
+const INITIAL_PITS = [1, 5, 5, 5, 5, 5, 1, 5, 5, 5, 5, 5];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export default function Board({ onScoresChange }) {
 	const [selectedSquare, setSelectedSquare] = useState(null);
+	const [activePlayer, setActivePlayer] = useState("bottom");
+	const [scores, setScores] = useState({ top: 0, bottom: 0 });
+	const [isAnimating, setIsAnimating] = useState(false);
+	const [pits, setPits] = useState([...INITIAL_PITS]);
+	const [flyingPieces, setFlyingPieces] = useState([]);
+	const [recentPit, setRecentPit] = useState(null);
 
-	const topRowIndices = [1, 2, 3, 4, 5];
-	const bottomRowIndices = [11, 10, 9, 8, 7];
+	const boardRef = useRef(null);
+	const pitRefs = useRef({});
+	const pieceIdRef = useRef(0);
 
-	const handleSquareClick = (index) => {
-		// Ngăn không cho click vào ô Quan (index 0 và 6)
-		if (index === 0 || index === 6) return;
-		
-		// Toggle ô
-		if (selectedSquare === index) {
-			setSelectedSquare(null);
-		} else {
-			setSelectedSquare(index);
+	useEffect(() => {
+		onScoresChange?.(scores);
+	}, [scores, onScoresChange]);
+
+	const isQuanPit = (index) => index === 0 || index === 6;
+	const isTopPit = (index) => TOP_PITS.includes(index);
+	const isBottomPit = (index) => BOTTOM_PITS.includes(index);
+
+	const getVisualStep = (index, direction) => {
+		// Hàng dưới hiển thị theo thứ tự 11 -> 7, nên chiều trái/phải phải đảo để đúng hướng nhìn.
+		if (isBottomPit(index)) {
+			return direction === "right" ? -1 : 1;
 		}
+
+		return direction === "right" ? 1 : -1;
 	};
 
-	const handleDirectionSelect = (e, index, direction) => {
-		e.stopPropagation();
-		console.log(`Chọn hướng ${direction} từ ô ${index}`);
+	const getNextIndex = (index, step) => {
+		if (step > 0) return (index + 1) % 12;
+		return (index + 11) % 12;
+	};
+
+	const setPitCount = (index, value) => {
+		setPits((prev) => {
+			const next = [...prev];
+			next[index] = value;
+			return next;
+		});
+	};
+
+	const addPitCount = (index, delta) => {
+		setPits((prev) => {
+			const next = [...prev];
+			next[index] += delta;
+			return next;
+		});
+	};
+
+	const markRecentPit = (index) => {
+		setRecentPit(index);
+		setTimeout(() => {
+			setRecentPit((prev) => (prev === index ? null : prev));
+		}, 220);
+	};
+
+	const getBoardCenter = () => {
+		const boardRect = boardRef.current?.getBoundingClientRect();
+		if (!boardRect) {
+			return { width: 0, height: 0 };
+		}
+		return { width: boardRect.width, height: boardRect.height };
+	};
+
+	const getPitCenter = (index) => {
+		const boardRect = boardRef.current?.getBoundingClientRect();
+		const pitRect = pitRefs.current[index]?.getBoundingClientRect();
+
+		if (!boardRect || !pitRect) {
+			const { width, height } = getBoardCenter();
+			return { x: width / 2, y: height / 2 };
+		}
+
+		return {
+			x: pitRect.left - boardRect.left + pitRect.width / 2,
+			y: pitRect.top - boardRect.top + pitRect.height / 2,
+		};
+	};
+
+	const getStorePoint = (owner) => {
+		const { width, height } = getBoardCenter();
+		if (owner === "top") {
+			return { x: width / 2, y: 16 };
+		}
+		return { x: width / 2, y: height - 16 };
+	};
+
+	const launchFlight = ({ fromIndex, toIndex, owner, type }) => {
+		const id = ++pieceIdRef.current;
+		const from = getPitCenter(fromIndex);
+		const to = toIndex === "store" ? getStorePoint(owner) : getPitCenter(toIndex);
+
+		const item = {
+			id,
+			x: from.x,
+			y: from.y,
+			toX: to.x,
+			toY: to.y,
+			owner,
+			type,
+			phase: "start",
+		};
+
+		setFlyingPieces((prev) => [...prev, item]);
+
+		requestAnimationFrame(() => {
+			setFlyingPieces((prev) =>
+				prev.map((piece) => (piece.id === id ? { ...piece, phase: "end" } : piece))
+			);
+		});
+
+		const duration = type === "capture" ? 430 : 260;
+		setTimeout(() => {
+			setFlyingPieces((prev) => prev.filter((piece) => piece.id !== id));
+		}, duration + 40);
+	};
+
+	const handleSquareClick = (index) => {
+		if (isAnimating || isQuanPit(index)) return;
+
+		const canPick = activePlayer === "top" ? isTopPit(index) : isBottomPit(index);
+		if (!canPick || pits[index] <= 0) return;
+
+		setSelectedSquare((prev) => (prev === index ? null : index));
+	};
+
+	const tryCapture = async (landingIndex, step, owner) => {
+		const gapIndex = getNextIndex(landingIndex, step);
+		const captureIndex = getNextIndex(gapIndex, step);
+
+		if (isQuanPit(captureIndex)) return;
+		if (pits[gapIndex] !== 0 || pits[captureIndex] <= 0) return;
+
+		const captured = pits[captureIndex];
+		setPitCount(captureIndex, 0);
+
+		for (let i = 0; i < captured; i += 1) {
+			launchFlight({ fromIndex: captureIndex, toIndex: "store", owner, type: "capture" });
+			await sleep(95);
+		}
+
+		setScores((prev) => ({ ...prev, [owner]: prev[owner] + captured }));
+	};
+
+	const executeMove = async (index, direction) => {
+		const step = getVisualStep(index, direction);
+		const owner = activePlayer;
+		const stones = pits[index];
+		if (stones <= 0) return;
+
+		setIsAnimating(true);
 		setSelectedSquare(null);
-		// TODO: Thực hiện logic di chuyển ở đây
+		setPitCount(index, 0);
+
+		let current = index;
+		for (let i = 0; i < stones; i += 1) {
+			const nextIndex = getNextIndex(current, step);
+			launchFlight({ fromIndex: current, toIndex: nextIndex, owner, type: "sow" });
+			await sleep(170);
+			addPitCount(nextIndex, 1);
+			markRecentPit(nextIndex);
+			current = nextIndex;
+		}
+
+		await sleep(120);
+		await tryCapture(current, step, owner);
+
+		await sleep(150);
+		setActivePlayer((prev) => (prev === "top" ? "bottom" : "top"));
+		setIsAnimating(false);
+	};
+
+	const handleDirectionSelect = async (e, index, direction) => {
+		e.stopPropagation();
+		if (isAnimating) return;
+		await executeMove(index, direction);
 	};
 
 	// Danh sách các border-radius tạo hình dáng nhấp nhô giống viên sỏi
@@ -36,64 +199,94 @@ export default function Board() {
 		"45% 55% 45% 55% / 55% 45% 55% 45%",
 	];
 
-	// Danh sách các màu sỏi đậm đà (Jewel tones) để lên màu nổi bật và dễ nhìn trên nền xám
+	// Bảng màu đơn sắc cho giao diện nền đen
 	const richColors = [
-		"radial-gradient(circle at 30% 30%, #ff5e62, #900c3f)", // Đỏ Ruby
-		"radial-gradient(circle at 30% 30%, #56ccf2, #154360)", // Xanh Sapphire
-		"radial-gradient(circle at 30% 30%, #58d68d, #145a32)", // Xanh Ngọc Lục
-		"radial-gradient(circle at 30% 30%, #f4d03f, #9c640c)", // Vàng Hổ Phách
-		"radial-gradient(circle at 30% 30%, #b39ddb, #4a235a)", // Tím Thạch Anh
-		"radial-gradient(circle at 30% 30%, #7f8c8d, #1c2833)", // Đen Obsidian
+		"radial-gradient(circle at 30% 30%, #4b5563, #020617)",
+		"radial-gradient(circle at 30% 30%, #374151, #000000)",
+		"radial-gradient(circle at 30% 30%, #52525b, #09090b)",
+		"radial-gradient(circle at 30% 30%, #3f3f46, #030712)",
+		"radial-gradient(circle at 30% 30%, #525252, #0a0a0a)",
+		"radial-gradient(circle at 30% 30%, #27272a, #000000)",
 	];
 
-	// Trình bày quân: Sỏi nhỏ cho Dân, Quan sẽ to hơn và giống ngọc nhiều màu
 	const renderPieces = (count, isQuan, index) => {
+		if (count <= 0) return null;
+
 		if (isQuan) {
-			// Quan trái Ngọc lục bảo đậm, Quan phải màu Đỏ Ruby/Hổ phách đậm
-			const isLeftQuan = index === 0;
-			const quanBackground = isLeftQuan 
-				? "radial-gradient(circle at 30% 25%, #48c9b0, #117a65, #0b5345)"
-				: "radial-gradient(circle at 30% 25%, #f1948a, #c0392b, #7b241c)";
-				
-			return (
-				<div className="flex items-center justify-center w-full h-full">
-					{count > 0 && (
-						<div 
-							className="w-10 h-20 lg:w-14 lg:h-24 shadow-md transition-all scale-100 hover:scale-[1.03]" 
+			// index === 0 là ô Quan của Người A (bottom)
+			// index === 6 là ô Quan của Người B (top)
+			if (index === 0 || index === 6) {
+				// Ô Quan: bố trí đẹp - viên to ở giữa + viên nhỏ xung quanh
+				const smallCount = Math.max(0, count - 1);
+				const displaySmallCount = Math.min(smallCount, 14);
+
+				return (
+					<div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+						{/* Viên to ở giữa */}
+						<div
+							className="absolute w-[55%] h-[55%] max-w-[28px] max-h-[28px]"
 							style={{
-								background: quanBackground,
-								borderRadius: "40% 60% 50% 50% / 50% 50% 60% 40%",
-								boxShadow: "2px 4px 8px rgba(0,0,0,0.4), inset -1px -1px 4px rgba(0,0,0,0.4)"
-							}} 
+								background: richColors[index % richColors.length],
+								borderRadius: pebbleShapes[index % pebbleShapes.length],
+								boxShadow: "2px 4px 8px rgba(0,0,0,0.4), inset -1px -1px 2px rgba(0,0,0,0.2)",
+							}}
 						/>
-					)}
-				</div>
-			);
+
+						{/* Viên nhỏ xung quanh theo vòng tròn */}
+						{Array.from({ length: displaySmallCount }).map((_, i) => {
+							const angle = (i / displaySmallCount) * Math.PI * 2;
+							const radius = 32;
+							const x = Math.cos(angle) * radius;
+							const y = Math.sin(angle) * radius;
+							
+							const shape = pebbleShapes[(i + index) % pebbleShapes.length];
+							const colorGradient = richColors[(i + index * 2) % richColors.length];
+
+							return (
+								<div
+									key={`${index}-small-${i}`}
+									className="absolute w-[35%] h-[35%] max-w-[16px] max-h-[16px]"
+									style={{
+										left: `calc(50% + ${x}px)`,
+										top: `calc(50% + ${y}px)`,
+										transform: "translate(-50%, -50%)",
+										background: colorGradient,
+										borderRadius: shape,
+										boxShadow: "1px 2px 4px rgba(0,0,0,0.35)",
+									}}
+								/>
+							);
+						})}
+					</div>
+				);
+			}
 		}
-		
+
+		const columns = Math.max(2, Math.ceil(Math.sqrt(count * 1.2)));
+		const rows = Math.ceil(count / columns);
+
 		return (
-			<div className="absolute inset-0 p-1 md:p-2 lg:p-3 pointer-events-none">
+			<div
+				className="absolute inset-0 p-1 md:p-2 lg:p-3 pointer-events-none grid gap-[2px]"
+				style={{
+					gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+					gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+				}}
+			>
 				{Array.from({ length: count }).map((_, i) => {
-					// Lựa chọn màu đậm đà cho hạt
 					const shape = pebbleShapes[(i + index) % pebbleShapes.length];
 					const rotate = (i * 87 + index * 15) % 360;
-					const colorGradient = richColors[(i + (index * 2)) % richColors.length];
-					
-					// Thuật toán trải "hỗn loạn" rải rác: dùng seed cố định
-					const leftPos = ((i * 73 + index * 47) % 60) + 20; // 20% -> 80%
-					const topPos = ((i * 97 + index * 13) % 60) + 20; // 20% -> 80%
-					
+					const colorGradient = richColors[(i + index * 2) % richColors.length];
+
 					return (
-						<div 
-							key={i} 
-							className="absolute w-4 h-4 lg:w-5 lg:h-5 transition-all pointer-events-auto cursor-pointer hover:scale-[1.2]" 
+						<div
+							key={`${index}-${i}`}
+							className="justify-self-center self-center aspect-square w-[72%] max-w-[18px]"
 							style={{
-								left: `${leftPos}%`,
-								top: `${topPos}%`,
 								background: colorGradient,
 								borderRadius: shape,
-								transform: `translate(-50%, -50%) rotate(${rotate}deg)`,
-								boxShadow: "1px 2px 4px rgba(0,0,0,0.4)"
+								transform: `rotate(${rotate}deg)`,
+								boxShadow: "1px 2px 4px rgba(0,0,0,0.35)",
 							}}
 						/>
 					);
@@ -104,29 +297,32 @@ export default function Board() {
 
 	const renderSquare = (index, isQuan = false, additionalClasses = "") => {
 		const isSelected = selectedSquare === index;
-		const pieceCount = isQuan ? 1 : 5;
+		const pieceCount = pits[index];
+		const isRecentPit = recentPit === index;
 
 		return (
 			<div
 				key={index}
-				className={`relative flex items-center justify-center cursor-pointer transition-colors ${additionalClasses} ${isSelected ? 'bg-gray-300' : 'bg-[#d8d9de] hover:bg-gray-300'}`}
+				ref={(node) => {
+					pitRefs.current[index] = node;
+				}}
+				className={`relative flex items-center justify-center cursor-pointer transition-colors ${additionalClasses} ${isSelected ? "bg-zinc-200" : "bg-white hover:bg-zinc-100"} ${isRecentPit ? "ring-2 ring-zinc-500 ring-inset" : ""} ${isAnimating ? "pointer-events-none" : ""}`}
 				onClick={() => handleSquareClick(index)}
 			>
 				{renderPieces(pieceCount, isQuan, index)}
 
-				{/* Arrow Overlay if selected */}
 				{isSelected && !isQuan && (
-					<div className="absolute inset-0 flex items-center justify-between px-1 z-10 pointer-events-none">
-						<button 
-							type="button" 
-							className="pointer-events-auto bg-white/70 text-black rounded-full p-1 border border-gray-400 hover:bg-white hover:scale-110 active:scale-95 transition-all shadow-md"
+					<div className="absolute inset-0 flex items-center justify-between px-1 z-20 pointer-events-none">
+						<button
+							type="button"
+							className="pointer-events-auto bg-black/90 text-white rounded-full p-1 border border-zinc-700 hover:bg-black hover:scale-110 active:scale-95 transition-all shadow-md"
 							onClick={(e) => handleDirectionSelect(e, index, "left")}
 						>
 							<ChevronLeft size={24} strokeWidth={2.5} />
 						</button>
-						<button 
-							type="button" 
-							className="pointer-events-auto bg-white/70 text-black rounded-full p-1 border border-gray-400 hover:bg-white hover:scale-110 active:scale-95 transition-all shadow-md"
+						<button
+							type="button"
+							className="pointer-events-auto bg-black/90 text-white rounded-full p-1 border border-zinc-700 hover:bg-black hover:scale-110 active:scale-95 transition-all shadow-md"
 							onClick={(e) => handleDirectionSelect(e, index, "right")}
 						>
 							<ChevronRight size={24} strokeWidth={2.5} />
@@ -138,29 +334,56 @@ export default function Board() {
 	};
 
 	return (
-		<div className="w-[95%] max-w-[900px] h-48 sm:h-64 shadow-xl rounded-[100px] border border-gray-400 bg-[#d8d9de] overflow-hidden flex">
-			{/* Left Quan */}
-			<div className="w-[15%] min-w-[70px] h-full flex flex-col border-r border-gray-400">
-				{renderSquare(0, true, "h-full w-full border-0")}
+		<div className="w-[95%] max-w-[900px]">
+			<div className="flex justify-center mb-3 text-sm sm:text-base text-zinc-800 px-2">
+				<div className="bg-white rounded-full px-4 py-1 border border-zinc-300">Lượt: {activePlayer === "top" ? "Người B / Máy" : "Người A"}</div>
 			</div>
 
-			{/* Middle Dan Grid (10 squares) */}
-			<div className="flex-1 grid grid-cols-5 grid-rows-2 h-full">
-				<div className="contents row-start-1">
-					{topRowIndices.map((i, idx) => 
-						renderSquare(i, false, `border-b border-gray-400 ${idx !== 4 ? 'border-r' : ''}`)
-					)}
-				</div>
-				<div className="contents row-start-2">
-					{bottomRowIndices.map((i, idx) => 
-						renderSquare(i, false, `${idx !== 4 ? 'border-r border-gray-400' : ''}`)
-					)}
-				</div>
-			</div>
+			<div ref={boardRef} className="relative h-48 sm:h-64 shadow-2xl rounded-[100px] border border-zinc-300 bg-white overflow-hidden flex">
+				<div className="absolute -top-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm bg-white text-zinc-900 px-4 py-1 rounded-full border border-zinc-300 shadow-lg">Kho B: {scores.top}</div>
+				<div className="absolute -bottom-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm bg-white text-zinc-900 px-4 py-1 rounded-full border border-zinc-300 shadow-lg">Kho A: {scores.bottom}</div>
 
-			{/* Right Quan */}
-			<div className="w-[15%] min-w-[70px] h-full flex flex-col border-l border-gray-400">
-				{renderSquare(6, true, "h-full w-full border-0")}
+				{flyingPieces.map((piece) => (
+					<div
+						key={piece.id}
+						className={`absolute z-30 rounded-full ${piece.type === "capture" ? "w-4 h-4 sm:w-5 sm:h-5" : "w-3 h-3 sm:w-4 sm:h-4"}`}
+						style={{
+							background: piece.owner === "top" ? "radial-gradient(circle at 30% 30%, #4b5563, #030712)" : "radial-gradient(circle at 30% 30%, #3f3f46, #000000)",
+							boxShadow: "0 0 8px rgba(0,0,0,0.25)",
+							left: 0,
+							top: 0,
+							transform: piece.phase === "end" ? `translate(${piece.toX}px, ${piece.toY}px)` : `translate(${piece.x}px, ${piece.y}px)`,
+							transitionProperty: "transform, opacity",
+							transitionDuration: piece.type === "capture" ? "430ms" : "260ms",
+							transitionTimingFunction: piece.type === "capture" ? "cubic-bezier(0.2, 0.8, 0.2, 1)" : "linear",
+							opacity: piece.phase === "end" ? 0.75 : 1,
+						}}
+					/>
+				))}
+
+				{/* Left Quan */}
+				<div className="w-[15%] min-w-[70px] h-full flex flex-col border-r border-zinc-300">
+					{renderSquare(0, true, "h-full w-full border-0")}
+				</div>
+
+				{/* Middle Dan Grid (10 squares) */}
+				<div className="flex-1 grid grid-cols-5 grid-rows-2 h-full">
+					<div className="contents row-start-1">
+						{TOP_ROW_INDICES.map((i, idx) =>
+							renderSquare(i, false, `border-b border-zinc-300 ${idx !== 4 ? "border-r" : ""}`)
+						)}
+					</div>
+					<div className="contents row-start-2">
+						{BOTTOM_ROW_INDICES.map((i, idx) =>
+							renderSquare(i, false, `${idx !== 4 ? "border-r border-zinc-300" : ""}`)
+						)}
+					</div>
+				</div>
+
+				{/* Right Quan */}
+				<div className="w-[15%] min-w-[70px] h-full flex flex-col border-l border-zinc-300">
+					{renderSquare(6, true, "h-full w-full border-0")}
+				</div>
 			</div>
 		</div>
 	);
