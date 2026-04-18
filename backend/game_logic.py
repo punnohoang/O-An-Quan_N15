@@ -37,6 +37,7 @@ def make_state(first_player="bottom"):
         "current_player": first_player,
         "status":         "playing",
         "winner":         None,
+        "final_result":   None,
         "move_log":       [],
     }
 
@@ -181,13 +182,27 @@ def apply_move(state, pit, direction):
 
 def _finalize(state):
     scores = state["scores"]
+    top_score = scores["top"]
+    bottom_score = scores["bottom"]
+
     state["status"] = "finished"
-    if scores["top"] > scores["bottom"]:
+    if top_score > bottom_score:
         state["winner"] = "top"
-    elif scores["bottom"] > scores["top"]:
+        summary = f"top thắng {top_score}-{bottom_score}"
+    elif bottom_score > top_score:
         state["winner"] = "bottom"
+        summary = f"bottom thắng {bottom_score}-{top_score}"
     else:
         state["winner"] = "draw"
+        summary = f"hòa {top_score}-{bottom_score}"
+
+    state["final_result"] = {
+        "top_score": top_score,
+        "bottom_score": bottom_score,
+        "score_diff": top_score - bottom_score,
+        "summary": summary,
+    }
+
     return state
 
 
