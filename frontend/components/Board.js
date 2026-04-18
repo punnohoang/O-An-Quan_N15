@@ -6,17 +6,20 @@ const TOP_PITS = [1, 2, 3, 4, 5];
 const BOTTOM_PITS = [7, 8, 9, 10, 11];
 const TOP_ROW_INDICES = [1, 2, 3, 4, 5];
 const BOTTOM_ROW_INDICES = [11, 10, 9, 8, 7];
-const INITIAL_PITS = [1, 5, 5, 5, 5, 5, 1, 5, 5, 5, 5, 5];
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5000";
+const INITIAL_PITS = [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:5000";
 const PICKUP_DELAY_MS = 320;
 const SOW_DELAY_MS = 420;
 const CAPTURE_DELAY_MS = 260;
+const PICKUP_FLIGHT_MS = 300;
+const PICKUP_STAGGER_MS = 32;
 const SOW_FLIGHT_MS = 620;
 const CAPTURE_FLIGHT_MS = 900;
+const CAPTURE_ARC_SPLIT = 0.42;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export default function Board({ onScoresChange, mode = "pve" }) {
+export default function Board({ onScoresChange, onTurnChange, getScoreTargetPoint, getPickupTargetPoint, mode = "pve" }) {
 	const [selectedSquare, setSelectedSquare] = useState(null);
 	const [gameState, setGameState] = useState(null);
 	const [displayPits, setDisplayPits] = useState([...INITIAL_PITS]);
@@ -25,7 +28,9 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 	const [isAiThinking, setIsAiThinking] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
 	const [flyingPieces, setFlyingPieces] = useState([]);
+	const [heldStones, setHeldStones] = useState(null);
 	const [recentPit, setRecentPit] = useState(null);
+	const backendHint = `Backend không phản hồi tại ${API_BASE}. Hãy chạy Flask ở cổng 5000.`;
 
 	const boardRef = useRef(null);
 	const pitRefs = useRef({});
@@ -36,10 +41,23 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 	const scores = gameState?.scores || { top: 0, bottom: 0 };
 	const activePlayer = gameState?.current_player || "bottom";
 	const isBusy = isLoading || isAnimating || isAiThinking;
+	const turnTheme = activePlayer === "top"
+		? {
+			scoreActive: "bg-blue-500 text-white border-blue-400",
+			scoreInactive: "bg-white text-zinc-900 border-zinc-300",
+		}
+		: {
+			scoreActive: "bg-rose-500 text-white border-rose-400",
+			scoreInactive: "bg-white text-zinc-900 border-zinc-300",
+		};
 
 	useEffect(() => {
 		onScoresChange?.(scores);
 	}, [scores, onScoresChange]);
+
+	useEffect(() => {
+		onTurnChange?.(activePlayer);
+	}, [activePlayer, onTurnChange]);
 
 	useEffect(() => {
 		const createGame = async () => {
@@ -58,7 +76,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 				setGameState(data);
 				setDisplayPits(data.board || INITIAL_PITS);
 			} catch (error) {
-				setErrorMessage(error.message || "Lỗi kết nối backend");
+				setErrorMessage(error.message || backendHint);
 			} finally {
 				setIsLoading(false);
 			}
@@ -106,7 +124,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 
 				setGameState(data.state);
 			} catch (error) {
-				setErrorMessage(error.message || "Lỗi lượt đi của AI");
+				setErrorMessage(error.message || backendHint);
 			} finally {
 				setIsAiThinking(false);
 				aiLockRef.current = false;
@@ -159,43 +177,90 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 	const getBoardCenter = () => {
 		const boardRect = boardRef.current?.getBoundingClientRect();
 		if (!boardRect) {
-			return { width: 0, height: 0 };
+			return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
 		}
-		return { width: boardRect.width, height: boardRect.height };
+		return {
+			x: boardRect.left + boardRect.width / 2,
+			y: boardRect.top + boardRect.height / 2,
+		};
 	};
 
 	const getPitCenter = (index) => {
-		const boardRect = boardRef.current?.getBoundingClientRect();
 		const pitRect = pitRefs.current[index]?.getBoundingClientRect();
 
-		if (!boardRect || !pitRect) {
-			const { width, height } = getBoardCenter();
-			return { x: width / 2, y: height / 2 };
+		if (!pitRect) {
+			return getBoardCenter();
 		}
 
 		return {
-			x: pitRect.left - boardRect.left + pitRect.width / 2,
-			y: pitRect.top - boardRect.top + pitRect.height / 2,
+			x: pitRect.left + pitRect.width / 2,
+			y: pitRect.top + pitRect.height / 2,
 		};
 	};
 
 	const getStorePoint = (owner) => {
-		const { width, height } = getBoardCenter();
-		if (owner === "top") {
-			return { x: width / 2, y: 16 };
+		const externalTarget = getScoreTargetPoint?.(owner);
+
+		if (externalTarget?.x != null && externalTarget?.y != null) {
+			return externalTarget;
 		}
-		return { x: width / 2, y: height - 16 };
+
+		const boardRect = boardRef.current?.getBoundingClientRect();
+		if (!boardRect) {
+			return getBoardCenter();
+		}
+
+		if (owner === "top") {
+			return { x: boardRect.left + boardRect.width / 2, y: boardRect.top + 16 };
+		}
+		return { x: boardRect.left + boardRect.width / 2, y: boardRect.bottom - 16 };
+	};
+
+	const getPickupPoint = (owner) => {
+		const externalTarget = getPickupTargetPoint?.(owner);
+
+		if (externalTarget?.x != null && externalTarget?.y != null) {
+			return externalTarget;
+		}
+
+		const boardRect = boardRef.current?.getBoundingClientRect();
+		if (!boardRect) {
+			return getBoardCenter();
+		}
+
+		if (owner === "top") {
+			return { x: boardRect.left + boardRect.width / 2, y: boardRect.top - 20 };
+		}
+		return { x: boardRect.left + boardRect.width / 2, y: boardRect.bottom + 20 };
 	};
 
 	const launchFlight = ({ fromIndex, toIndex, owner, type }) => {
 		const id = ++pieceIdRef.current;
 		const from = getPitCenter(fromIndex);
-		const to = toIndex === "store" ? getStorePoint(owner) : getPitCenter(toIndex);
+		const to = toIndex === "store"
+			? getStorePoint(owner)
+			: toIndex === "pickup"
+				? getPickupPoint(owner)
+				: getPitCenter(toIndex);
+		const isCapture = type === "capture";
+		const isPickup = type === "pickup";
+		const duration = isCapture ? CAPTURE_FLIGHT_MS : isPickup ? PICKUP_FLIGHT_MS : SOW_FLIGHT_MS;
+		const dx = to.x - from.x;
+		const dy = to.y - from.y;
+		const captureLift = Math.min(130, Math.max(70, Math.abs(dy) * 0.45 + 55));
+		const mid = isCapture
+			? {
+				x: from.x + dx * 0.5,
+				y: Math.min(from.y, to.y) - captureLift,
+			}
+			: null;
 
 		const item = {
 			id,
 			x: from.x,
 			y: from.y,
+			midX: mid?.x,
+			midY: mid?.y,
 			toX: to.x,
 			toY: to.y,
 			owner,
@@ -207,14 +272,55 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 
 		requestAnimationFrame(() => {
 			setFlyingPieces((prev) =>
-				prev.map((piece) => (piece.id === id ? { ...piece, phase: "end" } : piece))
+				prev.map((piece) => (piece.id === id ? { ...piece, phase: isCapture ? "mid" : "end" } : piece))
 			);
 		});
 
-		const duration = type === "capture" ? CAPTURE_FLIGHT_MS : SOW_FLIGHT_MS;
+		if (isCapture) {
+			setTimeout(() => {
+				setFlyingPieces((prev) =>
+					prev.map((piece) => (piece.id === id ? { ...piece, phase: "end" } : piece))
+				);
+			}, Math.round(duration * CAPTURE_ARC_SPLIT));
+		}
+
 		setTimeout(() => {
 			setFlyingPieces((prev) => prev.filter((piece) => piece.id !== id));
 		}, duration + 40);
+	};
+
+	const getFlightVisual = (piece) => {
+		const isCapture = piece.type === "capture";
+		const targetX = piece.phase === "end" ? piece.toX : piece.phase === "mid" ? piece.midX : piece.x;
+		const targetY = piece.phase === "end" ? piece.toY : piece.phase === "mid" ? piece.midY : piece.y;
+		const totalDuration = isCapture ? CAPTURE_FLIGHT_MS : SOW_FLIGHT_MS;
+		const isPickup = piece.type === "pickup";
+		const stageDuration = isCapture
+			? piece.phase === "mid"
+				? Math.round(totalDuration * CAPTURE_ARC_SPLIT)
+				: Math.round(totalDuration * (1 - CAPTURE_ARC_SPLIT))
+			: totalDuration;
+		const scale = isCapture
+			? piece.phase === "mid"
+				? 1.22
+				: piece.phase === "end"
+					? 0.72
+					: 1
+			: 1;
+		const opacity = isCapture ? (piece.phase === "end" ? 0.5 : 0.96) : isPickup ? 0.95 : 1;
+
+		return {
+			transform: `translate(${targetX}px, ${targetY}px) translate(-50%, -50%) scale(${scale})`,
+			transitionDuration: `${stageDuration}ms`,
+			opacity,
+			transitionTimingFunction: isCapture
+				? piece.phase === "end"
+					? "cubic-bezier(0.16, 0.88, 0.24, 1)"
+					: "cubic-bezier(0.28, 0.7, 0.25, 1)"
+				: isPickup
+					? "cubic-bezier(0.2, 0.78, 0.2, 1)"
+					: "cubic-bezier(0.22, 0.61, 0.36, 1)",
+		};
 	};
 
 	const buildMoveActions = (stateSnapshot, pit, direction) => {
@@ -227,7 +333,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 
 		if (stones <= 0) return actions;
 
-		actions.push({ type: "pickup", pit: pos });
+		actions.push({ type: "pickup", pit: pos, count: stones });
 		board[pos] = 0;
 
 		while (true) {
@@ -244,7 +350,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 
 			if (board[nextPos] > 0 && nextPos !== 0 && nextPos !== 6) {
 				stones = board[nextPos];
-				actions.push({ type: "pickup", pit: nextPos });
+				actions.push({ type: "pickup", pit: nextPos, count: stones });
 				board[nextPos] = 0;
 				pos = nextPos;
 				continue;
@@ -268,14 +374,34 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 	};
 
 	const animateMoveActions = async (actions, owner) => {
+		let carriedCount = 0;
+
 		for (const action of actions) {
 			if (action.type === "pickup") {
+				const visualCount = Math.min(action.count || 0, 8);
+				const pickupPoint = getPickupPoint(owner);
+				carriedCount = action.count || 0;
+				setHeldStones({ owner, count: carriedCount, x: pickupPoint.x, y: pickupPoint.y });
 				setPitCount(action.pit, 0);
-				await sleep(PICKUP_DELAY_MS);
+				for (let i = 0; i < visualCount; i += 1) {
+					setTimeout(() => {
+						launchFlight({ fromIndex: action.pit, toIndex: "pickup", owner, type: "pickup" });
+					}, i * PICKUP_STAGGER_MS);
+				}
+				await sleep(Math.max(PICKUP_DELAY_MS, PICKUP_FLIGHT_MS + visualCount * PICKUP_STAGGER_MS));
 				continue;
 			}
 
 			if (action.type === "sow") {
+				if (carriedCount > 0) {
+					carriedCount -= 1;
+					setHeldStones((prev) => {
+						if (!prev) return prev;
+						if (carriedCount <= 0) return null;
+						return { ...prev, count: carriedCount };
+					});
+				}
+
 				launchFlight({ fromIndex: action.from, toIndex: action.to, owner, type: "sow" });
 				await sleep(SOW_DELAY_MS);
 				addPitCount(action.to, 1);
@@ -284,6 +410,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 			}
 
 			if (action.type === "capture") {
+				setHeldStones(null);
 				setPitCount(action.pit, 0);
 				for (let i = 0; i < action.count; i += 1) {
 					launchFlight({ fromIndex: action.pit, toIndex: "store", owner, type: "capture" });
@@ -291,6 +418,8 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 				}
 			}
 		}
+
+		setHeldStones(null);
 	};
 
 	const handleSquareClick = (index) => {
@@ -314,6 +443,7 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 		setIsAnimating(true);
 		setErrorMessage("");
 		setSelectedSquare(null);
+		setHeldStones(null);
 
 		const actions = buildMoveActions(gameState, index, step);
 		await animateMoveActions(actions, owner);
@@ -334,10 +464,11 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 			}
 			setGameState(data);
 		} catch (error) {
-			setErrorMessage(error.message || "Không gửi được nước đi");
+			setErrorMessage(error.message || backendHint);
 			setDisplayPits([...(gameState.board || INITIAL_PITS)]);
 		} finally {
 			setIsAnimating(false);
+			setHeldStones(null);
 		}
 	};
 
@@ -351,26 +482,6 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 		if (winner === "top") return "Người B / Máy";
 		if (winner === "bottom") return "Người A";
 		return "Hòa";
-	};
-
-	const getStatusText = () => {
-		if (isLoading) return "Đang tạo ván mới...";
-		if (isAiThinking) return "Máy đang đi...";
-		if (!gameState) return "Chưa có dữ liệu ván";
-
-		if (gameState.status === "finished") {
-			const topScore = gameState?.final_result?.top_score ?? scores.top;
-			const bottomScore = gameState?.final_result?.bottom_score ?? scores.bottom;
-			const winnerLabel = getWinnerLabel(gameState.winner);
-
-			if (gameState.winner === "draw") {
-				return `Kết thúc • Hòa ${topScore}-${bottomScore}`;
-			}
-
-			return `Kết thúc • ${winnerLabel} thắng ${Math.max(topScore, bottomScore)}-${Math.min(topScore, bottomScore)}`;
-		}
-
-		return `Lượt: ${activePlayer === "top" ? "Người B / Máy" : "Người A"}`;
 	};
 
 	// Danh sách các border-radius tạo hình dáng nhấp nhô giống viên sỏi
@@ -396,52 +507,56 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 		if (count <= 0) return null;
 
 		if (isQuan) {
-			// index === 0 là ô Quan của Người A (bottom)
-			// index === 6 là ô Quan của Người B (top)
+			const isEaten = gameState?.big_piece_eaten?.[index.toString()] ?? false;
+
 			if (index === 0 || index === 6) {
-				// Ô Quan: bố trí đẹp - viên to ở giữa + viên nhỏ xung quanh
-				const smallCount = Math.max(0, count - 1);
-				const displaySmallCount = Math.min(smallCount, 14);
+				// Nếu chưa bị ăn, hiện 1 viên to + (count - 5) viên nhỏ
+				// Nếu đã bị ăn, hiện tất cả là viên nhỏ
+				if (!isEaten && count >= 5) {
+					const smallCount = Math.max(0, count - 5);
+					const displaySmallCount = Math.min(smallCount, 14);
 
-				return (
-					<div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-						{/* Viên to ở giữa */}
-						<div
-							className="absolute w-[55%] h-[55%] max-w-[28px] max-h-[28px]"
-							style={{
-								background: richColors[index % richColors.length],
-								borderRadius: pebbleShapes[index % pebbleShapes.length],
-								boxShadow: "2px 4px 8px rgba(0,0,0,0.4), inset -1px -1px 2px rgba(0,0,0,0.2)",
-							}}
-						/>
+					return (
+						<div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+							{/* Viên to ở giữa */}
+							<div
+								className="absolute w-[55%] h-[55%] max-w-[28px] max-h-[28px]"
+								style={{
+									background: richColors[index % richColors.length],
+									borderRadius: pebbleShapes[index % pebbleShapes.length],
+									boxShadow: "2px 4px 8px rgba(0,0,0,0.4), inset -1px -1px 2px rgba(0,0,0,0.2)",
+								}}
+							/>
 
-						{/* Viên nhỏ xung quanh theo vòng tròn */}
-						{Array.from({ length: displaySmallCount }).map((_, i) => {
-							const angle = (i / displaySmallCount) * Math.PI * 2;
-							const radius = 32;
-							const x = Math.cos(angle) * radius;
-							const y = Math.sin(angle) * radius;
+							{/* Viên nhỏ xung quanh theo vòng tròn */}
+							{Array.from({ length: displaySmallCount }).map((_, i) => {
+								const angle = (i / displaySmallCount) * Math.PI * 2;
+								const radius = 32;
+								const x = Math.cos(angle) * radius;
+								const y = Math.sin(angle) * radius;
 
-							const shape = pebbleShapes[(i + index) % pebbleShapes.length];
-							const colorGradient = richColors[(i + index * 2) % richColors.length];
+								const shape = pebbleShapes[(i + index) % pebbleShapes.length];
+								const colorGradient = richColors[(i + index * 2) % richColors.length];
 
-							return (
-								<div
-									key={`${index}-small-${i}`}
-									className="absolute w-[35%] h-[35%] max-w-[16px] max-h-[16px]"
-									style={{
-										left: `calc(50% + ${x}px)`,
-										top: `calc(50% + ${y}px)`,
-										transform: "translate(-50%, -50%)",
-										background: colorGradient,
-										borderRadius: shape,
-										boxShadow: "1px 2px 4px rgba(0,0,0,0.35)",
-									}}
-								/>
-							);
-						})}
-					</div>
-				);
+								return (
+									<div
+										key={`${index}-small-${i}`}
+										className="absolute w-[35%] h-[35%] max-w-[16px] max-h-[16px]"
+										style={{
+											left: `calc(50% + ${x}px)`,
+											top: `calc(50% + ${y}px)`,
+											transform: "translate(-50%, -50%)",
+											background: colorGradient,
+											borderRadius: shape,
+											boxShadow: "1px 2px 4px rgba(0,0,0,0.35)",
+										}}
+									/>
+								);
+							})}
+						</div>
+					);
+				}
+				// Nếu đã bị ăn hoặc count < 5 (trường hợp hiếm), render toàn bộ là quân nhỏ (rơi vào đoạn code bên dưới)
 			}
 		}
 
@@ -518,33 +633,43 @@ export default function Board({ onScoresChange, mode = "pve" }) {
 
 	return (
 		<div className="w-[95%] max-w-[900px]">
-			<div className="flex justify-center mb-3 text-sm sm:text-base text-zinc-800 px-2">
-				<div className="bg-white rounded-full px-4 py-1 border border-zinc-300">{getStatusText()}</div>
-			</div>
-
 			{errorMessage && <div className="mb-2 text-center text-sm text-red-600">{errorMessage}</div>}
 
 			<div ref={boardRef} className="relative h-48 sm:h-64 shadow-2xl rounded-[100px] border border-zinc-300 bg-white overflow-hidden flex">
-				<div className="absolute -top-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm bg-white text-zinc-900 px-4 py-1 rounded-full border border-zinc-300 shadow-lg">Kho B: {scores.top}</div>
-				<div className="absolute -bottom-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm bg-white text-zinc-900 px-4 py-1 rounded-full border border-zinc-300 shadow-lg">Kho A: {scores.bottom}</div>
+				<div className={`absolute -top-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm px-4 py-1 rounded-full border shadow-lg transition-colors ${activePlayer === "top" ? turnTheme.scoreActive : turnTheme.scoreInactive}`}>Kho B: {scores.top}</div>
+				<div className={`absolute -bottom-11 left-1/2 -translate-x-1/2 z-10 text-xs sm:text-sm px-4 py-1 rounded-full border shadow-lg transition-colors ${activePlayer === "bottom" ? turnTheme.scoreActive : turnTheme.scoreInactive}`}>Kho A: {scores.bottom}</div>
 
 				{flyingPieces.map((piece) => (
 					<div
 						key={piece.id}
-						className={`absolute z-30 rounded-full ${piece.type === "capture" ? "w-4 h-4 sm:w-5 sm:h-5" : "w-3 h-3 sm:w-4 sm:h-4"}`}
+						className={`fixed z-[70] pointer-events-none rounded-full ${piece.type === "capture" ? "w-4 h-4 sm:w-5 sm:h-5" : "w-3 h-3 sm:w-4 sm:h-4"}`}
 						style={{
 							background: piece.owner === "top" ? "radial-gradient(circle at 30% 30%, #4b5563, #030712)" : "radial-gradient(circle at 30% 30%, #3f3f46, #000000)",
-							boxShadow: "0 0 8px rgba(0,0,0,0.25)",
+							boxShadow: piece.type === "capture" ? "0 0 14px rgba(15,23,42,0.35)" : "0 0 5px rgba(0,0,0,0.2)",
 							left: 0,
 							top: 0,
-							transform: piece.phase === "end" ? `translate(${piece.toX}px, ${piece.toY}px)` : `translate(${piece.x}px, ${piece.y}px)`,
 							transitionProperty: "transform, opacity",
-							transitionDuration: `${piece.type === "capture" ? CAPTURE_FLIGHT_MS : SOW_FLIGHT_MS}ms`,
-							transitionTimingFunction: piece.type === "capture" ? "cubic-bezier(0.2, 0.8, 0.2, 1)" : "linear",
-							opacity: piece.phase === "end" ? 0.75 : 1,
+							...getFlightVisual(piece),
 						}}
 					/>
 				))}
+
+				{heldStones && heldStones.count > 0 && (
+					<div
+						className="fixed z-[75] pointer-events-none"
+						style={{
+							left: 0,
+							top: 0,
+							transform: `translate(${heldStones.x}px, ${heldStones.y}px) translate(-50%, -50%)`,
+						}}
+					>
+						<div className={`relative rounded-full border shadow-md px-3 py-2 min-w-[54px] text-center ${heldStones.owner === "top" ? "bg-blue-500/95 border-blue-300 text-white" : "bg-rose-500/95 border-rose-300 text-white"}`}>
+							<div className="absolute -top-2 -left-2 w-3 h-3 rounded-full bg-white/85" />
+							<div className="absolute -top-1 right-0 w-2.5 h-2.5 rounded-full bg-white/70" />
+							<span className="text-sm font-semibold leading-none">{heldStones.count}</span>
+						</div>
+					</div>
+				)}
 
 				{/* Left Quan */}
 				<div className="w-[15%] min-w-[70px] h-full flex flex-col border-r border-zinc-300">
