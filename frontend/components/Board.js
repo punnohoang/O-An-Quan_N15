@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useSound } from "./SoundContext";
 
@@ -20,7 +20,7 @@ const CAPTURE_ARC_SPLIT = 0.5;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScoreTargetPoint, getPickupTargetPoint, mode = "pve" }) {
+const Board = forwardRef(function Board({ onScoresChange, onTurnChange, onGameEnd, getScoreTargetPoint, getPickupTargetPoint, mode = "pve" }, ref) {
 	const { playSound } = useSound();
 	const [selectedSquare, setSelectedSquare] = useState(null);
 	const [gameState, setGameState] = useState(null);
@@ -38,6 +38,42 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 	const pitRefs = useRef({});
 	const pieceIdRef = useRef(0);
 	const aiLockRef = useRef(false);
+	const unmountedRef = useRef(false);
+	const animationTimeoutRefs = useRef([]);
+	const animationRafRefs = useRef([]);
+	const cancelAnimationRef = useRef(0);
+
+	useEffect(() => {
+		return () => {
+			unmountedRef.current = true;
+			aiLockRef.current = false;
+			animationTimeoutRefs.current.forEach((timeoutId) => clearTimeout(timeoutId));
+			animationTimeoutRefs.current = [];
+			animationRafRefs.current.forEach((rafId) => cancelAnimationFrame(rafId));
+			animationRafRefs.current = [];
+		};
+	}, []);
+
+	const clearAnimationTimers = () => {
+		animationTimeoutRefs.current.forEach((timeoutId) => clearTimeout(timeoutId));
+		animationTimeoutRefs.current = [];
+		animationRafRefs.current.forEach((rafId) => cancelAnimationFrame(rafId));
+		animationRafRefs.current = [];
+	};
+
+	const cancelBoardAnimations = () => {
+		cancelAnimationRef.current += 1;
+		clearAnimationTimers();
+		setFlyingPieces([]);
+		setHeldStones(null);
+		setSelectedSquare(null);
+		setIsAnimating(false);
+		setIsAiThinking(false);
+	};
+
+	useImperativeHandle(ref, () => ({
+		cancelBoardAnimations,
+	}));
 
 	const pits = displayPits;
 	const scores = gameState?.scores || { top: 0, bottom: 0 };
@@ -132,16 +168,22 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 					throw new Error(data?.error || "AI không thể đi");
 				}
 
+				if (unmountedRef.current) return;
+
 				if (typeof data?.pit === "number" && (data?.direction === 1 || data?.direction === -1)) {
 					const actions = buildMoveActions(gameState, data.pit, data.direction);
 					await animateMoveActions(actions, "top");
 				}
 
+				if (unmountedRef.current) return;
 				setGameState(data.state);
 			} catch (error) {
+				if (unmountedRef.current) return;
 				setErrorMessage(error.message || backendHint);
 			} finally {
-				setIsAiThinking(false);
+				if (!unmountedRef.current) {
+					setIsAiThinking(false);
+				}
 				aiLockRef.current = false;
 			}
 		};
@@ -184,9 +226,11 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 
 	const markRecentPit = (index) => {
 		setRecentPit(index);
-		setTimeout(() => {
+		const timeoutId = window.setTimeout(() => {
+			animationTimeoutRefs.current = animationTimeoutRefs.current.filter((value) => value !== timeoutId);
 			setRecentPit((prev) => (prev === index ? null : prev));
 		}, 220);
+		animationTimeoutRefs.current.push(timeoutId);
 	};
 
 	const getBoardCenter = () => {
@@ -250,6 +294,8 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 	};
 
 	const launchFlight = ({ fromIndex, toIndex, owner, type }) => {
+		if (cancelAnimationRef.current > 0) return;
+
 		const id = ++pieceIdRef.current;
 		const from = getPitCenter(fromIndex);
 		const to = toIndex === "store"
@@ -285,23 +331,29 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 
 		setFlyingPieces((prev) => [...prev, item]);
 
-		requestAnimationFrame(() => {
+		const rafId = requestAnimationFrame(() => {
+			animationRafRefs.current = animationRafRefs.current.filter((value) => value !== rafId);
 			setFlyingPieces((prev) =>
 				prev.map((piece) => (piece.id === id ? { ...piece, phase: isCapture ? "mid" : "end" } : piece))
 			);
 		});
+		animationRafRefs.current.push(rafId);
 
 		if (isCapture) {
-			setTimeout(() => {
+			const midTimeoutId = window.setTimeout(() => {
+				animationTimeoutRefs.current = animationTimeoutRefs.current.filter((value) => value !== midTimeoutId);
 				setFlyingPieces((prev) =>
 					prev.map((piece) => (piece.id === id ? { ...piece, phase: "end" } : piece))
 				);
 			}, Math.round(duration * CAPTURE_ARC_SPLIT));
+			animationTimeoutRefs.current.push(midTimeoutId);
 		}
 
-		setTimeout(() => {
+		const removeTimeoutId = window.setTimeout(() => {
+			animationTimeoutRefs.current = animationTimeoutRefs.current.filter((value) => value !== removeTimeoutId);
 			setFlyingPieces((prev) => prev.filter((piece) => piece.id !== id));
 		}, duration + 40);
+		animationTimeoutRefs.current.push(removeTimeoutId);
 	};
 
 	const getFlightVisual = (piece) => {
@@ -400,8 +452,11 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 
 	const animateMoveActions = async (actions, owner) => {
 		let carriedCount = 0;
+		const runId = cancelAnimationRef.current;
 
 		for (const action of actions) {
+			if (cancelAnimationRef.current !== runId) return;
+
 			if (action.type === "pickup") {
 				const visualCount = Math.min(action.count || 0, 8);
 				const pickupPoint = getPickupPoint(owner);
@@ -410,11 +465,15 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 				setPitCount(action.pit, 0);
 				playSound("pickup");
 				for (let i = 0; i < visualCount; i += 1) {
-					setTimeout(() => {
+					const timeoutId = window.setTimeout(() => {
+						animationTimeoutRefs.current = animationTimeoutRefs.current.filter((value) => value !== timeoutId);
+						if (cancelAnimationRef.current !== runId) return;
 						launchFlight({ fromIndex: action.pit, toIndex: "pickup", owner, type: "pickup" });
 					}, i * PICKUP_STAGGER_MS);
+					animationTimeoutRefs.current.push(timeoutId);
 				}
 				await sleep(Math.max(PICKUP_DELAY_MS, PICKUP_FLIGHT_MS + visualCount * PICKUP_STAGGER_MS));
+				if (cancelAnimationRef.current !== runId) return;
 				continue;
 			}
 
@@ -431,6 +490,7 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 				launchFlight({ fromIndex: action.from, toIndex: action.to, owner, type: "sow" });
 				playSound("sow");
 				await sleep(SOW_DELAY_MS);
+				if (cancelAnimationRef.current !== runId) return;
 				addPitCount(action.to, 1);
 				markRecentPit(action.to);
 				continue;
@@ -443,6 +503,7 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 				for (let i = 0; i < action.count; i += 1) {
 					launchFlight({ fromIndex: action.pit, toIndex: "store", owner, type: "capture" });
 					await sleep(CAPTURE_DELAY_MS);
+					if (cancelAnimationRef.current !== runId) return;
 				}
 			}
 		}
@@ -724,4 +785,6 @@ export default function Board({ onScoresChange, onTurnChange, onGameEnd, getScor
 			</div>
 		</div>
 	);
-}
+});
+
+export default Board;

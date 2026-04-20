@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 import InstructionModal from "./InstructionModal";
 import { useSound } from "./SoundContext";
 
-export default function SettingsModal({ isOpen, onClose }) {
+export default function SettingsModal({ isOpen, onClose, onExit }) {
 	const {
-		playSound,
+		stopEffects,
 		masterVolume,
 		musicVolume,
 		effectsVolume,
@@ -26,7 +27,14 @@ export default function SettingsModal({ isOpen, onClose }) {
 	if (!isOpen) return null;
 
 	const handleExit = () => {
-		onClose();
+		window.setTimeout(() => {
+			stopEffects();
+			if (onExit) {
+				onExit();
+				return;
+			}
+			onClose();
+		}, 80);
 	};
 
 	const handleMusicVolumeChange = (event) => {
@@ -43,17 +51,26 @@ export default function SettingsModal({ isOpen, onClose }) {
 
 	const handleOpenSoundPanel = () => {
 		setIsSoundPanelOpen(true);
-		playSound("click");
 	};
 
 	const handleBackToMenu = () => {
 		setIsSoundPanelOpen(false);
-		playSound("click");
 	};
 
 	return (
 		<div className="fixed inset-0 z-[200] flex items-center justify-center bg-white/60 backdrop-blur-sm">
-			<div className="bg-[#d8d9de] w-[90%] max-w-[800px] h-auto min-h-[450px] rounded-[2rem] flex flex-col items-center justify-center gap-7 py-10 px-6 shadow-2xl">
+			<div className="relative bg-[#d8d9de] w-[90%] max-w-[800px] h-auto min-h-[450px] rounded-[2rem] flex flex-col items-center justify-center gap-7 py-10 px-6 shadow-2xl">
+
+				{/* Nút X đóng modal */}
+				<button
+					type="button"
+					aria-label="Đóng"
+					onClick={onClose}
+					className="absolute top-5 right-5 text-zinc-600 hover:text-zinc-900 transition-colors"
+				>
+					<X size={32} strokeWidth={2.5} />
+				</button>
+
 				{!isSoundPanelOpen ? (
 					<>
 						<button

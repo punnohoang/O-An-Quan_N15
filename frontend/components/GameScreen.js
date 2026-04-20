@@ -5,9 +5,12 @@ import { Settings, UserRound, Bot, CircleX } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Board from "./Board";
 import SettingsModal from "./SettingsModal";
+import { useSound } from "./SoundContext";
 
 export default function GameScreen({ mode = "pve" }) {
 	const router = useRouter();
+	const { stopEffects } = useSound();
+	const boardRef = useRef(null);
 	const topPlayerName = mode === "pvp" ? "Người B" : "BOT";
 	const topPlayerIcon = mode === "pvp" ? <UserRound size={32} /> : <Bot size={32} />;
 	const [scores, setScores] = useState({ top: 0, bottom: 0 });
@@ -56,8 +59,20 @@ export default function GameScreen({ mode = "pve" }) {
 	}, []);
 
 	const handleContinue = () => {
-		router.push("/mode");
+		window.setTimeout(() => {
+			boardRef.current?.cancelBoardAnimations?.();
+			stopEffects();
+			router.push("/mode");
+		}, 80);
 	};
+
+	const handleExitGame = useCallback((target) => {
+		window.setTimeout(() => {
+			boardRef.current?.cancelBoardAnimations?.();
+			stopEffects();
+			target();
+		}, 80);
+	}, [stopEffects]);
 
 	const getResultLabel = (side) => {
 		if (!gameResult) return "";
@@ -117,6 +132,7 @@ export default function GameScreen({ mode = "pve" }) {
 			{/* Game Board */}
 			<div className="flex-1 flex items-center justify-center w-full z-10">
 				<Board
+					ref={boardRef}
 					key={boardSeed}
 					mode={mode}
 					onScoresChange={setScores}
@@ -149,7 +165,7 @@ export default function GameScreen({ mode = "pve" }) {
 					>
 						<Settings size={56} strokeWidth={2.2} />
 					</button>
-					<button type="button" aria-label="Đóng" className="absolute top-5 right-5 text-zinc-900 hover:scale-105 transition-transform" onClick={() => router.push("/")}>
+					<button type="button" aria-label="Đóng" className="absolute top-5 right-5 text-zinc-900 hover:scale-105 transition-transform" onClick={() => handleExitGame(() => router.push("/"))}>
 						<CircleX size={56} strokeWidth={2.2} />
 					</button>
 
@@ -198,7 +214,7 @@ export default function GameScreen({ mode = "pve" }) {
 				</div>
 			)}
 
-			<SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+			<SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} onExit={() => handleExitGame(() => router.push("/mode"))} />
 		</main>
 	);
 }

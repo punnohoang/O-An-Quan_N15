@@ -21,6 +21,7 @@ export const SoundProvider = ({ children }) => {
 	const audioContextRef = useRef(null);
 	const bgMusicTimerRef = useRef(null);
 	const bgMusicTimeoutRefs = useRef([]);
+	const effectTimeoutRefs = useRef([]);  // Track tat ca effect timeouts
 	const bgMusicActiveRef = useRef(false);
 	const musicArmedRef = useRef(false);
 
@@ -48,6 +49,39 @@ export const SoundProvider = ({ children }) => {
 
 		bgMusicTimeoutRefs.current.forEach((timeoutId) => clearTimeout(timeoutId));
 		bgMusicTimeoutRefs.current = [];
+	};
+
+	const stopAllEffects = () => {
+		// Clear tat ca effect timeouts
+		effectTimeoutRefs.current.forEach((timeoutId) => clearTimeout(timeoutId));
+		effectTimeoutRefs.current = [];
+	};
+
+	const stopEffectsChannel = () => {
+		if (!audioContextRef.current || !audioContextRef.current.__soundMaster) return;
+
+		const now = audioContextRef.current.currentTime;
+		const { effectsGain } = audioContextRef.current.__soundMaster;
+		effectsGain.gain.cancelScheduledValues(now);
+		effectsGain.gain.setValueAtTime(0, now);
+	};
+
+	const stopAllSounds = () => {
+		// 1. Dung tat ca music timeouts
+		stopBackgroundMusic();
+		
+		// 2. Dung tat ca effect timeouts
+		stopAllEffects();
+		stopEffectsChannel();
+		
+		// 3. Reset flags
+		bgMusicActiveRef.current = false;
+		musicArmedRef.current = false;
+		
+		// 4. Suspend AudioContext de tat ngay lap tuc tat ca oscillator/buffer dang chay
+		if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+			audioContextRef.current.suspend().catch(() => {});
+		}
 	};
 
 	const scheduleTimeout = (callback, delay) => {
@@ -322,6 +356,7 @@ export const SoundProvider = ({ children }) => {
 
 		return () => {
 			stopBackgroundMusic();
+			stopAllEffects();
 			bgMusicActiveRef.current = false;
 			if (audioContextRef.current) {
 				audioContextRef.current.close().catch(() => {});
@@ -340,7 +375,7 @@ export const SoundProvider = ({ children }) => {
 		if (bgMusicActiveRef.current) {
 			void playMusicLoop();
 		}
-	}, [musicEnabled]);
+	}, [musicEnabled, effectsEnabled]);
 
 	useEffect(() => {
 		const ctx = audioContextRef.current;
@@ -446,9 +481,14 @@ export const SoundProvider = ({ children }) => {
 
 		const notes = presets[type] || [];
 		notes.forEach((note) => {
-			window.setTimeout(() => {
+			const timeoutId = window.setTimeout(() => {
+				// Remove tu list khi chay xong
+				effectTimeoutRefs.current = effectTimeoutRefs.current.filter((id) => id !== timeoutId);
 				playTone(ctx, note);
 			}, note.delay || 0);
+			
+			// Track timeout de co the clear sau
+			effectTimeoutRefs.current.push(timeoutId);
 		});
 	};
 
@@ -473,12 +513,24 @@ export const SoundProvider = ({ children }) => {
 			}
 		};
 
+		const handleButtonClick = (event) => {
+			if (!effectsEnabled) return;
+			if (typeof event.target?.closest !== "function") return;
+
+			const interactiveElement = event.target.closest("button, .start-button, .mode-button, [role='button']");
+			if (!interactiveElement) return;
+
+			void playSyntheticSound("click");
+		};
+
 		window.addEventListener("pointerdown", handleFirstInteraction, { once: true, passive: true });
 		window.addEventListener("keydown", handleFirstInteraction, { once: true });
+		window.addEventListener("click", handleButtonClick, true);
 
 		return () => {
 			window.removeEventListener("pointerdown", handleFirstInteraction);
 			window.removeEventListener("keydown", handleFirstInteraction);
+			window.removeEventListener("click", handleButtonClick, true);
 		};
 	}, [musicEnabled]);
 
@@ -489,6 +541,9 @@ export const SoundProvider = ({ children }) => {
 				toggleMute,
 				playSound,
 				startMusic,
+				stopMusic: stopBackgroundMusic,
+				stopEffects: stopAllEffects,
+				stopAllSounds,
 				musicEnabled,
 				effectsEnabled,
 				musicVolume,
