@@ -34,6 +34,7 @@ def make_state(first_player="bottom"):
     return {
         "board":          make_board(),
         "scores":         {"top": 0, "bottom": 0},
+        "big_piece_eaten": {"0": False, "6": False},
         "current_player": first_player,
         "status":         "playing",
         "winner":         None,
@@ -69,7 +70,7 @@ def get_valid_moves(state):
 
 # ─── Move logic (y het logic goc) ────────────────────────────────────────────
 
-def _do_move(board, scores, pos, direction, player):
+def _do_move(board, scores, big_piece_eaten, pos, direction, player):
     """
     Thuc hien nuoc di tren board (in-place).
     Logic copy nguyen van tu ham move() trong file goc.
@@ -100,6 +101,11 @@ def _do_move(board, scores, pos, direction, player):
                 eaten = board[next_next]
                 scores[player] += eaten
                 board[next_next] = 0
+                
+                # Neu o bi an la o Quan (0 hoac 6), danh dau quan to da bi an
+                if str(next_next) in big_piece_eaten:
+                    big_piece_eaten[str(next_next)] = True
+
                 pos       = next_next
                 next_pos  = (pos + direction) % 12
                 next_next = (pos + 2 * direction) % 12
@@ -146,7 +152,7 @@ def apply_move(state, pit, direction):
     move_log = state["move_log"]
 
     # 1. Thuc hien nuoc di
-    _do_move(board, scores, pit, direction, player)
+    _do_move(board, scores, state["big_piece_eaten"], pit, direction, player)
 
     # Ghi log
     state["move_log"] = move_log + [{
